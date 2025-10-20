@@ -154,11 +154,12 @@ void            uartintr(void);
 void            uartputc(int);
 void            uartputc_sync(int);
 int             uartgetc(void);
+// kernel/defs.h
 
 // vm.c
 void            kvminit(void);
 void            kvminithart(void);
-void            kvmmap(pagetable_t, uint64, uint64, uint64, int);
+void            kvmmap(pagetable_t, uint64, uint64, uint64, int);  // 改为 5 个参数
 int             mappages(pagetable_t, uint64, uint64, uint64, int);
 pagetable_t     uvmcreate(void);
 void            uvmfirst(pagetable_t, uchar *, uint);
@@ -174,7 +175,12 @@ int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 void            vmprint(pagetable_t);
-
+uint64          kvmpa(uint64);
+// 添加新的内核页表相关函数
+pagetable_t     proc_kpt_init(void);
+void            uvmmap(pagetable_t, uint64, uint64, uint64, int);
+void            proc_freekernelpagetable(pagetable_t);
+void            proc_inithart(pagetable_t);
 // plic.c
 void            plicinit(void);
 void            plicinithart(void);

@@ -132,14 +132,6 @@ found:
     return 0;
   }
 
-  if ((p->usyscallpage = (struct usyscall *)kalloc()) == 0) {
-    freeproc(p);
-    release(&p->lock);
-    return 0;
-  }
-
-  p->usyscallpage->pid = p->pid;
-
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -147,15 +139,47 @@ found:
     release(&p->lock);
     return 0;
   }
-  
+// Init the kernal page table
+  p->kernelpt = proc_kpt_init();
+  if(p->kernelpt == 0){
+  freeproc(p);
+  release(&p->lock);
+  return 0;
+  }
+  // Allocate a page for the process's kernel stack.
+// Map it high in memory, followed by an invalid
+// guard page.
+char *pa = kalloc();
+if(pa == 0)
+  panic("kalloc");
+uint64 va = KSTACK((int) (p - proc));
+uvmmap(p->kernelpt, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
-
   return p;
+}
+void
+proc_freekernelpt(pagetable_t kernelpt)
+{
+  // similar to the freewalk method
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kernelpt[i];
+    if(pte & PTE_V){
+      kernelpt[i] = 0;
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        proc_freekernelpt((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void*)kernelpt);
 }
 
 // free a proc structure and the data hanging from it,
@@ -167,9 +191,6 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->usyscallpage)
-    kfree((void *)p->usyscallpage);
-  p->usyscallpage = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -181,6 +202,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  uvmunmap(p->kernelpt,p->kstack,1,1);
+  p->kstack=0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -194,12 +217,6 @@ proc_pagetable(struct proc *p)
   pagetable = uvmcreate();
   if(pagetable == 0)
     return 0;
-
-
-  if(mappages(pagetable, USYSCALL, PGSIZE, (uint64)(p->usyscallpage), PTE_R | PTE_U) < 0) {
-    uvmfree(pagetable, 0);
-    return 0;
-  }
 
   // map the trampoline code (for system call return)
   // at the highest user virtual address.
@@ -230,7 +247,6 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -460,6 +476,7 @@ wait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+// proc.c - scheduler()
 void
 scheduler(void)
 {
@@ -474,15 +491,19 @@ scheduler(void)
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
+        // Switch to chosen process.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程的内核页表
+        proc_inithart(p->kernelpt);
+
         swtch(&c->context, &p->context);
 
+        // 切换回全局内核页表
+        kvminithart();
+
         // Process is done running for now.
-        // It should have changed its p->state before coming back.
         c->proc = 0;
       }
       release(&p->lock);
